@@ -1,0 +1,7 @@
+websockets>=11.0.3
+numpy>=1.24.3
+pandas>=2.0.0
+scipy>=1.10.0
+--extra-index-url https://PySimpleGUI.net/install
+PySimpleGUI
+setuptools>=68.0.0
