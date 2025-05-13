@@ -143,16 +143,6 @@ python main.py
 3. Make your changes
 4. Submit a pull request
 
-## License
-
-MIT License - See LICENSE file for details
-
-## Support
-
-- GitHub Issues: Bug reports and feature requests
-- Documentation: Wiki pages and inline code comments
-- Email: support@example.com
-
 ## Roadmap
 
 ### Upcoming Features
@@ -163,7 +153,3 @@ MIT License - See LICENSE file for details
 - API integration
 - Portfolio simulation
 
-### Version History
-- v1.0.0: Initial release
-- v1.1.0: Added performance monitoring
-- v1.2.0: Enhanced market impact models
