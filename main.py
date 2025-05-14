@@ -15,9 +15,24 @@ from PySimpleGUI import Window
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("trade_simulator")
 
-WEBSOCKET_URL = "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/okx/BTC-USDT-SWAP"
+WEBSOCKET_ENDPOINTS = {
+    "OKX": {
+        "BTC-USDT-SWAP": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/okx/BTC-USDT-SWAP",
+        "ETH-USDT-SWAP": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/okx/ETH-USDT-SWAP",
+        "SOL-USDT-SWAP": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/okx/SOL-USDT-SWAP",
+        "XRP-USDT-SWAP": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/okx/XRP-USDT-SWAP"
+    },
+    "Binance": {
+        "BTC-USDT": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/binance/BTC-USDT",
+        "ETH-USDT": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/binance/ETH-USDT",
+        "SOL-USDT": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/binance/SOL-USDT",
+        "XRP-USDT": "wss://ws.gomarket-cpp.goquant.io/ws/l2-orderbook/binance/XRP-USDT"
+    }
+}
+
 MAX_ORDERBOOK_LEVELS = 50
 UPDATE_INTERVAL_MS = 100
+MAX_HISTORY_SIZE = 300
 
 class OrderBook:
     def __init__(self):
@@ -61,12 +76,11 @@ class OrderBook:
             near_bid_volume = sum(qty for price, qty in self.bids if price >= mid_price - threshold)
             self.volume_history.append((current_time, near_ask_volume + near_bid_volume))
             
-            max_history = 300
-            if len(self.price_history) > max_history:
-                self.price_history = self.price_history[-max_history:]
-                self.spread_history = self.spread_history[-max_history:]
-                self.mid_price_history = self.mid_price_history[-max_history:]
-                self.volume_history = self.volume_history[-max_history:]
+            if len(self.price_history) > MAX_HISTORY_SIZE:
+                self.price_history = self.price_history[-MAX_HISTORY_SIZE:]
+                self.spread_history = self.spread_history[-MAX_HISTORY_SIZE:]
+                self.mid_price_history = self.mid_price_history[-MAX_HISTORY_SIZE:]
+                self.volume_history = self.volume_history[-MAX_HISTORY_SIZE:]
     
     def get_liquidity_at_level(self, usd_amount: float, side: str = "buy") -> Tuple[float, float]:
         if not self.asks or not self.bids:
@@ -91,6 +105,19 @@ class OrderBook:
         
         avg_price = total_cost / executed_quantity if executed_quantity > 0 else 0
         return avg_price, executed_quantity
+    
+    def calculate_price_volatility(self, window_size=20):
+        if len(self.mid_price_history) < window_size:
+            return 0.01  # Default value if not enough data
+            
+        recent_prices = self.mid_price_history[-window_size:]
+        returns = [np.log(recent_prices[i] / recent_prices[i-1]) for i in range(1, len(recent_prices))]
+        
+        if not returns:
+            return 0.01
+            
+        volatility = np.std(returns) * np.sqrt(86400)  # Annualized
+        return volatility if not np.isnan(volatility) else 0.01
 
 
 class MarketImpactCalculator:
@@ -152,16 +179,27 @@ class MarketImpactCalculator:
         return maker_pct, taker_pct
     
     def calculate_fees(self, quantity: float, fee_tier: str = "vip0") -> float:
-        fee_structure = {
-            "vip0": {"maker": 0.0008, "taker": 0.0010},
-            "vip1": {"maker": 0.0007, "taker": 0.0009},
-            "vip2": {"maker": 0.0006, "taker": 0.0008},
-            "vip3": {"maker": 0.0005, "taker": 0.0007},
-            "vip4": {"maker": 0.0003, "taker": 0.0005},
-            "vip5": {"maker": 0.0000, "taker": 0.0003},
+        fee_structures = {
+            "OKX": {
+                "vip0": {"maker": 0.0008, "taker": 0.0010},
+                "vip1": {"maker": 0.0007, "taker": 0.0009},
+                "vip2": {"maker": 0.0006, "taker": 0.0008},
+                "vip3": {"maker": 0.0005, "taker": 0.0007},
+                "vip4": {"maker": 0.0003, "taker": 0.0005},
+                "vip5": {"maker": 0.0000, "taker": 0.0003},
+            },
+            "Binance": {
+                "vip0": {"maker": 0.0010, "taker": 0.0010},
+                "vip1": {"maker": 0.0008, "taker": 0.0010},
+                "vip2": {"maker": 0.0006, "taker": 0.0008},
+                "vip3": {"maker": 0.0004, "taker": 0.0006},
+                "vip4": {"maker": 0.0002, "taker": 0.0004},
+                "vip5": {"maker": 0.0000, "taker": 0.0002},
+            }
         }
         
-        tier_fees = fee_structure.get(fee_tier.lower(), fee_structure["vip0"])
+        exchange = self.orderbook.exchange if self.orderbook.exchange in fee_structures else "OKX"
+        tier_fees = fee_structures[exchange].get(fee_tier.lower(), fee_structures[exchange]["vip0"])
         maker_fee = tier_fees["maker"]
         taker_fee = tier_fees["taker"]
         
@@ -202,9 +240,18 @@ class TradeSimulator:
         self.quantity = 100.0
         self.volatility = 0.02
         self.fee_tier = "vip0"
+        self.websocket_url = WEBSOCKET_ENDPOINTS["OKX"]["BTC-USDT-SWAP"]
         
         self.process_times = []
         self.last_tick_time = time.time()
+        
+    def update_symbol_and_exchange(self, exchange, symbol):
+        if exchange in WEBSOCKET_ENDPOINTS and symbol in WEBSOCKET_ENDPOINTS[exchange]:
+            self.exchange = exchange
+            self.symbol = symbol
+            self.websocket_url = WEBSOCKET_ENDPOINTS[exchange][symbol]
+            return True
+        return False
         
     async def connect_websocket(self):
         max_retries = 5
@@ -213,8 +260,8 @@ class TradeSimulator:
         
         while self.running and retry_count < max_retries:
             try:
-                logger.info(f"Connecting to {WEBSOCKET_URL}")
-                async with websockets.connect(WEBSOCKET_URL) as websocket:
+                logger.info(f"Connecting to {self.websocket_url}")
+                async with websockets.connect(self.websocket_url) as websocket:
                     retry_count = 0
                     while self.running:
                         try:
@@ -225,6 +272,10 @@ class TradeSimulator:
                             data = json.loads(response)
                             
                             self.orderbook.update(data)
+                            
+                            # Update volatility from orderbook data or from user input
+                            calculated_volatility = self.orderbook.calculate_price_volatility()
+                            self.volatility = max(calculated_volatility, self.volatility)
                             self.market_impact_calculator.update_volatility(self.volatility)
                             
                             end_time = time.time()
@@ -277,9 +328,17 @@ class TradeSimulator:
 
 
 def create_layout():
+    # Get available exchanges and symbols
+    exchanges = list(WEBSOCKET_ENDPOINTS.keys())
+    default_exchange = "OKX"
+    default_symbol = "BTC-USDT-SWAP"
+    symbols = list(WEBSOCKET_ENDPOINTS[default_exchange].keys())
+    
     input_column = [
-        [sg.Text("Exchange:", size=(15, 1)), sg.InputText("OKX", key="-EXCHANGE-", size=(20, 1), disabled=True)],
-        [sg.Text("Symbol:", size=(15, 1)), sg.InputText("BTC-USDT-SWAP", key="-SYMBOL-", size=(20, 1), disabled=True)],
+        [sg.Text("Exchange:", size=(15, 1)), 
+         sg.Combo(exchanges, default_value=default_exchange, key="-EXCHANGE-", size=(20, 1), enable_events=True)],
+        [sg.Text("Symbol:", size=(15, 1)), 
+         sg.Combo(symbols, default_value=default_symbol, key="-SYMBOL-", size=(20, 1), enable_events=True)],
         [sg.Text("Order Type:", size=(15, 1)), 
          sg.Combo(["market", "limit"], default_value="market", key="-ORDER_TYPE-", size=(20, 1))],
         [sg.Text("Quantity (USD):", size=(15, 1)), 
@@ -295,6 +354,7 @@ def create_layout():
         [sg.Text("Best Bid:", size=(15, 1)), sg.Text("", key="-BEST_BID-", size=(20, 1))],
         [sg.Text("Best Ask:", size=(15, 1)), sg.Text("", key="-BEST_ASK-", size=(20, 1))],
         [sg.Text("Spread (%):", size=(15, 1)), sg.Text("", key="-SPREAD-", size=(20, 1))],
+        [sg.Text("Volatility (%):", size=(15, 1)), sg.Text("", key="-CALC_VOLATILITY-", size=(20, 1))],
         [sg.Text("Last Update:", size=(15, 1)), sg.Text("", key="-LAST_UPDATE-", size=(20, 1))],
     ]
     
@@ -340,6 +400,7 @@ async def update_ui(window, simulator):
                 window["-BEST_BID-"].update(f"{best_bid:.2f}")
                 window["-BEST_ASK-"].update(f"{best_ask:.2f}")
                 window["-SPREAD-"].update(f"{spread_pct:.4f}%")
+                window["-CALC_VOLATILITY-"].update(f"{simulator.volatility * 100:.4f}%")
                 
                 last_update = datetime.fromtimestamp(simulator.last_tick_time).strftime("%H:%M:%S.%f")[:-3]
                 window["-LAST_UPDATE-"].update(last_update)
@@ -365,21 +426,55 @@ async def update_ui(window, simulator):
 
 
 async def handle_events(window, simulator):
+    current_websocket_task = None
+    
     while simulator.running:
         event, values = window.read(timeout=10)
         
         if event in (sg.WIN_CLOSED, "Exit"):
             simulator.running = False
             break
-            
+        
+        elif event == "-EXCHANGE-":
+            # Update symbols list based on selected exchange
+            exchange = values["-EXCHANGE-"]
+            symbols = list(WEBSOCKET_ENDPOINTS[exchange].keys())
+            window["-SYMBOL-"].update(values=symbols, value=symbols[0] if symbols else "")
+        
         elif event == "-APPLY-":
             try:
+                # Update simulator parameters from inputs
+                new_exchange = values["-EXCHANGE-"]
+                new_symbol = values["-SYMBOL-"]
+                
+                # Check if exchange/symbol changed - need to reconnect websocket
+                exchange_symbol_changed = (new_exchange != simulator.exchange or new_symbol != simulator.symbol)
+                
                 simulator.quantity = float(values["-QUANTITY-"])
                 simulator.volatility = float(values["-VOLATILITY-"]) / 100
                 simulator.fee_tier = values["-FEE_TIER-"]
                 simulator.order_type = values["-ORDER_TYPE-"]
-                logger.info(f"Updated parameters: quantity={simulator.quantity}, "
-                           f"volatility={simulator.volatility}, fee_tier={simulator.fee_tier}")
+                
+                if exchange_symbol_changed:
+                    if simulator.update_symbol_and_exchange(new_exchange, new_symbol):
+                        logger.info(f"Switching to {new_exchange} {new_symbol}")
+                        
+                        # Cancel current websocket task if it exists
+                        if current_websocket_task and not current_websocket_task.done():
+                            current_websocket_task.cancel()
+                            try:
+                                await current_websocket_task
+                            except asyncio.CancelledError:
+                                pass
+                        
+                        # Start new websocket connection
+                        current_websocket_task = asyncio.create_task(simulator.connect_websocket())
+                    else:
+                        logger.error(f"Invalid exchange/symbol combination: {new_exchange}/{new_symbol}")
+                
+                logger.info(f"Updated parameters: exchange={simulator.exchange}, symbol={simulator.symbol}, "
+                            f"quantity={simulator.quantity}, volatility={simulator.volatility}, "
+                            f"fee_tier={simulator.fee_tier}")
             except Exception as e:
                 logger.error(f"Error updating parameters: {e}")
         
